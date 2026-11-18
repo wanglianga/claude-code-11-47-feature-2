@@ -111,3 +111,109 @@ def test_precompute_and_rebuild_endpoints(fresh_db):
     rebuild = client.post("/cache/rebuild", json={"new_cutoff": C2.isoformat()}).json()
     # 无失效窗口时重建数为 0，接口仍正常返回
     assert "rebuilt_count" in rebuild
+
+
+# ------------------------------------------------------ 安置点情报接口 --
+def test_shelter_intel_catalog_announcements_versions(fresh_db):
+    cutoff = C1.isoformat()
+    cat = client.get("/shelter-intel/catalog", params={"cutoff": cutoff}).json()
+    assert cat["version"]["module"] == "catalog"
+    assert len(cat["sites"]) >= 9
+
+    anns = client.get("/shelter-intel/announcements", params={"cutoff": cutoff}).json()
+    kinds = {a["kind"] for a in anns["announcements"]}
+    assert {"capacity", "open"} <= kinds
+    # 撤销公告为迟到补传（09:30 才收到），C1 截止点不可见；更晚截止点才出现
+    assert "revoke" not in kinds
+    late_anns = client.get(
+        "/shelter-intel/announcements",
+        params={"cutoff": "2026-07-15T10:00:00+00:00"},
+    ).json()
+    assert "revoke" in {a["kind"] for a in late_anns["announcements"]}
+
+    ents = client.get(
+        "/shelter-intel/entities", params={"cutoff": cutoff, "policy": "auto"}
+    ).json()
+    pending = [r for r in ents["resolutions"] if r["entity_status"] == "entity_pending"]
+    assert any(r["announcement_id"] == "ANN-AMB-S2" for r in pending)
+
+    versions = client.get("/shelter-intel/versions").json()["versions"]
+    modules = {v["module"] for v in versions}
+    assert {"catalog", "announcements", "entity_resolution"} <= modules
+
+
+def test_shelter_intel_report_endpoint_and_demand_capacity_separation(fresh_db):
+    r = client.post("/scenarios", json=_scenario_payload("情报报告", max_trip_minutes=60)).json()
+    rep = client.post(
+        "/shelter-intel/reports",
+        json={"task_id": r["task_id"], "policy": "auto"},
+    ).json()
+    report = rep["report"]
+    assert report["reachable_demand_population"] > 0
+    assert report["capacity_low_total"] <= report["capacity_high_total"]
+    assert report["comparison"] in {
+        "capacity_shortfall", "capacity_meets_demand_lower_bound",
+        "inconclusive_between_bounds",
+    }
+    # 两个指标分属不同字段，没有“已服务人数”
+    assert "served_population" not in report["summary_json"]["demand_side"]
+    assert "served_population" not in report["summary_json"]["capacity_side"]
+
+    listing = client.get("/shelter-intel/reports", params={"task_id": r["task_id"]}).json()
+    assert len(listing["reports"]) == 1
+    detail = client.get(f"/shelter-intel/reports/{report['report_id']}").json()
+    assert len(detail["sites"]) == len(rep["sites"])
+
+
+def test_shelter_intel_late_announcement_ingest_flow(fresh_db):
+    r = client.post("/scenarios", json=_scenario_payload("迟到公告", max_trip_minutes=30)).json()
+    # 先出报告（截止点 C1）
+    first = client.post(
+        "/shelter-intel/reports", json={"task_id": r["task_id"], "policy": "auto"}
+    ).json()
+    assert len(client.get("/shelter-intel/reports").json()["reports"]) == 1
+
+    # 迟到补传撤销 M_S1：received_at 指定为 09:40，晚于 C1
+    ingest = client.post("/shelter-intel/announcements", json={
+        "announcement_id": "ANN-REV-S1-LATE",
+        "kind": "revoke",
+        "site_name": "河东桥社区安置点",
+        "address": "城北区河东路8号",
+        "geom_x": 2000, "geom_y": 0,
+        "effective_at": "2026-07-15T07:00:00+00:00",
+        "received_at": "2026-07-15T09:40:00+00:00",
+        "note": "迟到补传撤销",
+    }).json()
+    assert ingest["announcement"]["announcement_id"] == "ANN-REV-S1-LATE"
+
+    # 旧截止点报告不变
+    same = client.post(
+        "/shelter-intel/reports", json={"task_id": r["task_id"], "policy": "auto"}
+    ).json()
+    assert same["report"]["report_id"] == first["report"]["report_id"]
+
+    # 新截止点报告看到撤销，并列出受影响场所
+    late = client.post("/shelter-intel/reports", json={
+        "task_id": r["task_id"], "policy": "auto",
+        "evidence_cutoff": "2026-07-15T10:00:00+00:00",
+    }).json()
+    s1 = next(s for s in late["sites"] if s["site_key"] == "M_S1")
+    assert s1["open_status"] == "revoked"
+    affected = {a["site_key"] for a in late["report"]["affected_sites"]}
+    assert "M_S1" in affected
+
+
+def test_shelter_intel_entity_override_endpoint(fresh_db):
+    cutoff = C1.isoformat()
+    out = client.post("/shelter-intel/entities/override", json={
+        "announcement_id": "ANN-AMB-S2",
+        "action": "confirm",
+        "master_id": "M_S2B",
+        "note": "确认 88 号校区",
+    }).json()
+    assert out["override"]["action"] == "confirm"
+    ents = client.get(
+        "/shelter-intel/entities", params={"cutoff": cutoff, "policy": "auto"}
+    ).json()["resolutions"]
+    amb = next(r for r in ents if r["announcement_id"] == "ANN-AMB-S2")
+    assert amb["entity_status"] == "resolved" and amb["master_id"] == "M_S2B"

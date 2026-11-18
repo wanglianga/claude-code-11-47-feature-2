@@ -56,6 +56,10 @@ def reseed(conn) -> None:
         cur.execute(
             """
             TRUNCATE TABLE
+                shelter_scenario_site_results, shelter_scenario_reports,
+                shelter_entity_overrides, shelter_announcements,
+                shelter_coordinate_revisions, shelter_masters,
+                shelter_module_versions,
                 grid_share_results, node_arrivals, coverage_summaries,
                 coverage_cache_index, compute_task_viewers, task_edge_dependencies,
                 compute_tasks, publications, scenarios, grid_connectors,
@@ -70,6 +74,7 @@ def reseed(conn) -> None:
     _seed_documents_and_network(conn)
     _seed_shelters(conn)
     _seed_population(conn)
+    _seed_shelter_intel(conn)
     conn.commit()
 
 
@@ -434,6 +439,145 @@ def seed_large(conn) -> None:
                 )
 
 
+# ------------------------------------------------ 安置点情报样例（本批次） --
+# 验收要点：同名异址、床位与人数混用、占用未知、核验过期、单位无法换算、
+# 到达时尚未开放、撤销公告迟到补传、场所容量低于可达需求、实体匹配冲突。
+_LATE_REVOKE_RECEIVED = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
+
+
+def _seed_shelter_intel(conn) -> None:
+    """写入场所主档、坐标修订、公告、开放/撤销记录（全部带来源与接收时间）。"""
+    with conn.cursor() as cur:
+        master_doc = _add_doc(
+            cur, "shelter", "安置场所主档（2026-07 版）", "坐标单位：米；地址按行政区门牌",
+            datetime(2026, 7, 1, tzinfo=UTC), C1,
+            raw="场所主档：河东桥社区、南门学校（两处同名异址）、东站展厅、西环体育馆、"
+                "城南礼堂、北仓储备、江畔小学、江北文化站",
+        )
+        # (master_id, name, address, x, y, node, frozen_shelter)
+        masters = [
+            ("M_S1", "河东桥社区安置点", "城北区河东路8号", 1990, 10, "N3", "S1"),
+            ("M_S2A", "南门学校安置点", "南门区学府街12号", 2000, 1000, "N6", "S2"),
+            ("M_S2B", "南门学校安置点", "南门区学府街88号", 2600, 1200, "N6", None),
+            ("M_S3", "东站展厅安置点", "东站路1号", 4000, 0, "N7", "S3"),
+            ("M_S4", "西环体育馆安置点", "西环路20号", 1000, 1000, "N5", None),
+            ("M_S5", "城南礼堂安置点", "城南路5号", 2500, 900, "N6", None),
+            ("M_S6", "北仓储备安置点", "北仓路3号", 500, 200, "N1", None),
+            ("M_S7", "江畔小学安置点", "江畔路7号", 3000, 0, "N4", None),
+            ("M_S8", "江北文化站", "江北路9号", 1500, 500, "N6", None),
+        ]
+        cur.executemany(
+            """INSERT INTO shelter_masters
+                   (master_id, name, address, geom_x, geom_y, node_id, shelter_id,
+                    source_doc_id, received_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            [(mid, name, addr, x, y, node, frozen, master_doc,
+              datetime(2026, 7, 1, tzinfo=UTC)) for mid, name, addr, x, y, node, frozen
+             in masters],
+        )
+        # 坐标修订：M_S1 由 (1990,10) 校正为 (2000,0)，证据截止点 C1 前可见
+        cur.execute(
+            """INSERT INTO shelter_coordinate_revisions
+                   (master_id, revision_no, geom_x, geom_y, change_note, source_doc_id, received_at)
+               VALUES ('M_S1',1,2000,0,'现场核验后校正坐标',%s,%s)""",
+            (master_doc, datetime(2026, 7, 10, tzinfo=UTC)),
+        )
+
+        def doc(title, unit, occurred, received, raw):
+            return _add_doc(cur, "shelter", title, unit, occurred, received, raw=raw)
+
+        cap_unit = "人 / 床位 / 房间（见原文）"
+        # 容量核验公告：已验证、带核验时点与证明有效期
+        def cap(ann_id, name, addr, x, y, unit_raw, value, occ, occ_known=True,
+                expires=datetime(2026, 12, 31, tzinfo=UTC), received=None, raw=""):
+            rid = received or (C1 - timedelta(minutes=10))
+            d = doc(f"容量核验：{name}", cap_unit,
+                    datetime(2026, 7, 14, 18, tzinfo=UTC), rid,
+                    raw or f"{name} 现场核验容量 {value} {unit_raw}，占用 {occ}")
+            cur.execute(
+                """INSERT INTO shelter_announcements
+                       (announcement_id, revision_no, kind, site_name, address, geom_x, geom_y,
+                        unit_raw, capacity_value, occupancy_value, occupancy_known,
+                        verified_at, proof_expires_at, note, source_doc_id, received_at)
+                   VALUES (%s,1,'capacity',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (ann_id, name, addr, x, y, unit_raw, value, occ, occ_known,
+                 datetime(2026, 7, 14, 18, tzinfo=UTC), expires,
+                 "现场核验人数/床位数/房间数", d, rid),
+            )
+
+        cap("ANN-CAP-S1", "河东桥社区安置点", "城北区河东路8号", 2000, 0,
+            "人", 800, 200)
+        cap("ANN-CAP-S2A", "南门学校安置点", "南门区学府街12号", 2000, 1000,
+            "床", 400, 100)
+        cap("ANN-CAP-S2B", "南门学校安置点", "南门区学府街88号", 2600, 1200,
+            "人", 300, 0)
+        cap("ANN-CAP-S3", "东站展厅安置点", "东站路1号", 4000, 0,
+            "床", 500, 50)
+        cap("ANN-CAP-S4", "西环体育馆安置点", "西环路20号", 1000, 1000,
+            "人", 150, 0)
+        cap("ANN-CAP-S5", "城南礼堂安置点", "城南路5号", 2500, 900,
+            "人", 400, None, occ_known=False)
+        cap("ANN-CAP-S6", "北仓储备安置点", "北仓路3号", 500, 200,
+            "人", 600, 0, expires=datetime(2026, 7, 1, tzinfo=UTC))
+        cap("ANN-CAP-S7", "江畔小学安置点", "江畔路7号", 3000, 0,
+            "人", 500, 0)
+        cap("ANN-CAP-S8", "江北文化站", "江北路9号", 1500, 500,
+            "间", 40, 0)
+
+        # 开放记录公告（新场所没有冻结开放区间，靠公告登记）
+        def open_ann(ann_id, name, addr, x, y, frm, to):
+            rid = C1 - timedelta(minutes=10)
+            d = doc(f"开放安排：{name}", "时间：UTC", frm, rid,
+                    raw=f"{name} 开放区间 {frm.isoformat()} ~ {to.isoformat()}")
+            cur.execute(
+                """INSERT INTO shelter_announcements
+                       (announcement_id, revision_no, kind, site_name, address, geom_x, geom_y,
+                        open_from, open_to, source_doc_id, received_at)
+                   VALUES (%s,1,'open',%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (ann_id, name, addr, x, y, frm, to, d, rid),
+            )
+
+        open_ann("ANN-OPEN-S4", "西环体育馆安置点", "西环路20号", 1000, 1000,
+                 datetime(2026, 7, 15, 6, tzinfo=UTC), datetime(2026, 7, 15, 20, tzinfo=UTC))
+        open_ann("ANN-OPEN-S5", "城南礼堂安置点", "城南路5号", 2500, 900,
+                 datetime(2026, 7, 15, 6, tzinfo=UTC), datetime(2026, 7, 15, 20, tzinfo=UTC))
+        open_ann("ANN-OPEN-S6", "北仓储备安置点", "北仓路3号", 500, 200,
+                 datetime(2026, 7, 15, 6, tzinfo=UTC), datetime(2026, 7, 15, 20, tzinfo=UTC))
+        open_ann("ANN-OPEN-S7", "江畔小学安置点", "江畔路7号", 3000, 0,
+                 datetime(2026, 7, 15, 9, tzinfo=UTC), datetime(2026, 7, 15, 12, tzinfo=UTC))
+        open_ann("ANN-OPEN-S8", "江北文化站", "江北路9号", 1500, 500,
+                 datetime(2026, 7, 15, 6, tzinfo=UTC), datetime(2026, 7, 15, 20, tzinfo=UTC))
+
+        # 歧义公告：只写名称“南门学校安置点”，无地址/坐标 → 两处同名异址均命中，
+        # 证据不占优 → 无论 auto 还是 manual 都保持实体待核。
+        amb_doc = doc("开放补充：南门学校安置点", "时间：UTC",
+                      datetime(2026, 7, 15, 6, tzinfo=UTC), C1 - timedelta(minutes=10),
+                      raw="某村报送“南门学校安置点”可开放，但未注明校区与门牌")
+        cur.execute(
+            """INSERT INTO shelter_announcements
+                   (announcement_id, revision_no, kind, site_name, note,
+                    source_doc_id, received_at)
+               VALUES ('ANN-AMB-S2',1,'open',%s,%s,%s,%s)""",
+            ("南门学校安置点", "仅名称，未注明校区/门牌，与两处同名场所冲突", amb_doc,
+             C1 - timedelta(minutes=10)),
+        )
+
+        # 撤销公告迟到补传：生效 07:00，但 09:30 才收到 → C1 报告不可见，
+        # 只有截止点推进到 09:30 后的新报告才看到撤销，并列出受影响场所。
+        rev_doc = doc("撤销公告（补传）：西环体育馆", "时间：UTC",
+                      datetime(2026, 7, 15, 7, tzinfo=UTC), _LATE_REVOKE_RECEIVED,
+                      raw="西环体育馆因结构复核于 07:00 撤销其安置功能（公告迟到补传）")
+        cur.execute(
+            """INSERT INTO shelter_announcements
+                   (announcement_id, revision_no, kind, site_name, address, geom_x, geom_y,
+                    effective_at, note, source_doc_id, received_at)
+               VALUES ('ANN-REV-S4',1,'revoke',%s,%s,%s,%s,%s,%s,%s,%s)""",
+            ("西环体育馆安置点", "西环路20号", 1000, 1000,
+             datetime(2026, 7, 15, 7, tzinfo=UTC), "结构复核撤销，公告补传",
+             rev_doc, _LATE_REVOKE_RECEIVED),
+        )
+
+
 if __name__ == "__main__":
     from .db import get_conn, init_db
 
@@ -441,4 +585,5 @@ if __name__ == "__main__":
     with get_conn() as connection:
         reseed(connection)
         seed_large(connection)
-    print("seed completed: small hand-computable network + large 8x8 sample")
+    print("seed completed: small hand-computable network + large 8x8 sample "
+          "+ 安置点情报样例（实体消歧 / 容量核验）")

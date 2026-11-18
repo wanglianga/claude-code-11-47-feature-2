@@ -81,6 +81,19 @@ def main():
         cur.execute("SELECT version_id, cutoff_at, edge_fingerprint, event_fingerprint FROM road_network_versions ORDER BY version_id")
         for r in cur.fetchall():
             print(" version:", r)
+
+    # ---- 安置点情报：需求与容量分开展示、迟到撤销只产生新报告 ----
+    from app.services.shelter_report import build_scenario_report
+
+    rep = build_scenario_report(conn, task_id=ta, policy="auto")
+    print("shelter demand:", rep["report"]["reachable_demand_population"],
+          "capacity:", rep["report"]["capacity_low_total"],
+          "-", rep["report"]["capacity_high_total"],
+          "comparison:", rep["report"]["comparison"])
+    for s in rep["sites"]:
+        print("  site", s["site_key"], s["status"], s["open_status"],
+              s["proof_status"], s["capacity_unit"], s["available_low"],
+              s["available_high"])
     conn.close()
 
 

@@ -242,3 +242,148 @@ export interface Comparison {
   warnings: string[];
   basis_checks: Record<string, boolean>;
 }
+
+// ------------------------------------------------------ 安置点情报 --
+export type SiteStatus =
+  | "ok"
+  | "capacity_unknown"
+  | "upper_bound_uncertain"
+  | "not_open"
+  | "entity_pending";
+
+export type EntityPolicy = "auto" | "manual";
+
+export interface ShelterCatalogSite {
+  master_id: string;
+  name: string;
+  address: string;
+  x: number;
+  y: number;
+  node_id: string | null;
+  shelter_id: string | null;
+  coordinate_revision: number;
+  coordinate_changed: boolean;
+}
+
+export interface ShelterAnnouncementRow {
+  announcement_id: string;
+  revision_no: number;
+  kind: "open" | "capacity" | "revoke" | "coordinate";
+  site_name: string;
+  address: string | null;
+  unit_raw: string | null;
+  capacity_value: number | null;
+  occupancy_value: number | null;
+  occupancy_known: boolean;
+  verified_at: string | null;
+  proof_expires_at: string | null;
+  open_from: string | null;
+  open_to: string | null;
+  effective_at: string | null;
+  received_at: string;
+  source_doc_id: number | null;
+  note: string | null;
+}
+
+export interface EntityCandidate {
+  master_id: string;
+  name: string;
+  address: string;
+  score: number;
+  matched_on: string[];
+}
+
+export interface EntityResolution {
+  announcement_id: string;
+  entity_status: "resolved" | "entity_pending" | "rejected";
+  master_id: string | null;
+  match_method: string | null;
+  candidates: EntityCandidate[];
+  reason: string | null;
+}
+
+export interface ShelterSiteResult {
+  site_key: string;
+  master_id: string | null;
+  display_name: string;
+  address: string | null;
+  geom_x: number | null;
+  geom_y: number | null;
+  entity_status: "resolved" | "entity_pending";
+  entity_policy: EntityPolicy;
+  match_method: string | null;
+  candidate_count: number;
+  candidates_json: EntityCandidate[];
+  announcement_ids: string[];
+  capacity_unit_raw: string | null;
+  capacity_unit: string | null;
+  capacity_value: number | null;
+  capacity_persons: number | null;
+  occupancy_known: boolean | null;
+  occupancy_value: number | null;
+  available_low: number | null;
+  available_high: number | null;
+  open_status: string;
+  open_from: string | null;
+  open_to: string | null;
+  proof_status: "valid" | "expired" | "missing";
+  verified_at: string | null;
+  status: SiteStatus;
+  status_reason: string | null;
+  included_in_total: boolean;
+  evidence_sources: Array<{
+    announcement_id: string;
+    revision_no: number;
+    kind: string;
+    source_doc_id: number | null;
+    received_at: string | null;
+  }>;
+}
+
+export interface ShelterReport {
+  report_id: string;
+  signature: string;
+  task_id: string;
+  policy: EntityPolicy;
+  evaluation_time: string;
+  evidence_cutoff_at: string;
+  version_catalog: number;
+  version_announcements: number;
+  version_entity: number;
+  version_capacity: number;
+  version_report: number;
+  previous_report_id: string | null;
+  reachable_demand_population: number;
+  capacity_low_total: number;
+  capacity_high_total: number;
+  comparison:
+    | "capacity_shortfall"
+    | "capacity_meets_demand_lower_bound"
+    | "inconclusive_between_bounds";
+  affected_sites: Array<Record<string, unknown>>;
+  summary_json: {
+    demand_side: Record<string, unknown>;
+    capacity_side: Record<string, unknown>;
+    comparison: string;
+    policy: EntityPolicy;
+    evaluation_time: string;
+    shelter_evidence_cutoff_at: string;
+    non_allocation_invariants: string[];
+    status_counts: Record<string, number>;
+  };
+  created_at?: string;
+}
+
+export interface ShelterReportResult {
+  report: ShelterReport;
+  sites: ShelterSiteResult[];
+}
+
+export interface ShelterModuleVersion {
+  module: string;
+  version_id: number;
+  cutoff_at: string;
+  fingerprint: string;
+  detail: Record<string, unknown> | null;
+  created_at: string;
+}

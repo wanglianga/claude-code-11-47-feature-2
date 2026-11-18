@@ -63,3 +63,45 @@ class EventCreate(BaseModel):
     speed_limit_kmh: Optional[float] = None
     source_title: str = "临时上报事件"
     raw_text: str = ""
+
+
+# ------------------------------------------------------ 安置点情报接口 --
+class ShelterReportRequest(BaseModel):
+    task_id: str
+    policy: str = Field(default="auto", pattern="^(auto|manual)$")
+    evidence_cutoff: Optional[datetime] = None
+    evaluation_time: Optional[datetime] = None
+    created_by: str = "analyst"
+
+
+class AnnouncementCreate(BaseModel):
+    """公告接入：允许显式指定 received_at 以模拟迟到补传。"""
+
+    announcement_id: str
+    kind: str = Field(pattern="^(open|capacity|revoke|coordinate)$")
+    site_name: str
+    address: Optional[str] = None
+    geom_x: Optional[float] = None
+    geom_y: Optional[float] = None
+    unit_raw: Optional[str] = None
+    capacity_value: Optional[float] = None
+    occupancy_value: Optional[float] = None
+    occupancy_known: bool = True
+    verified_at: Optional[datetime] = None
+    proof_expires_at: Optional[datetime] = None
+    open_from: Optional[datetime] = None
+    open_to: Optional[datetime] = None
+    effective_at: Optional[datetime] = None
+    note: Optional[str] = None
+    title: Optional[str] = None
+    raw_text: str = ""
+    received_at: Optional[datetime] = None
+    source_occurred_at: Optional[datetime] = None
+
+
+class EntityOverrideCreate(BaseModel):
+    announcement_id: str
+    action: str = Field(pattern="^(confirm|reject)$")
+    master_id: Optional[str] = None
+    note: Optional[str] = None
+    created_by: str = "analyst"

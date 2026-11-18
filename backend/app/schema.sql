@@ -302,3 +302,170 @@ CREATE TABLE IF NOT EXISTS publications (
     created_by          TEXT NOT NULL DEFAULT 'analyst',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================================
+-- 安置点实体解析与容量证据核验（在不改变冻结道路时态/开放区间的前提下扩展）
+-- 设计纪律：
+--   1. 本模块只报告“可达需求”与“场所可用容量”两个独立指标，不做居民分配、
+--      不推导网格→场所先后次序、不逐格扣减容量；
+--   2. 场所目录 / 公告接入 / 实体消歧 / 容量核验 / 情景报告 五条职责各自持有
+--      独立版本流（shelter_module_versions），迟到公告只产生新版本与新结果；
+--   3. 旧报告与旧版本不可改写：报告按内容指纹去重，追加新内容只会得到新报告。
+-- ============================================================================
+
+-- ---------------------------------------------------------- 场所目录模块 --
+-- 场所主档：一个物理场所一行。坐标为原始坐标，坐标修订见下表。
+CREATE TABLE IF NOT EXISTS shelter_masters (
+    master_id           TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    address             TEXT NOT NULL,
+    geom_x              DOUBLE PRECISION NOT NULL,
+    geom_y              DOUBLE PRECISION NOT NULL,
+    node_id             TEXT REFERENCES road_nodes(node_id),
+    shelter_id          TEXT REFERENCES shelters(shelter_id),  -- 关联冻结基线既有安置点（可空）
+    source_doc_id       BIGINT REFERENCES source_documents(doc_id),
+    received_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    active              BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 坐标修订：追加式，按 received_at <= cutoff 取最新修订，旧截止点可复现。
+CREATE TABLE IF NOT EXISTS shelter_coordinate_revisions (
+    master_id           TEXT NOT NULL REFERENCES shelter_masters(master_id),
+    revision_no         INTEGER NOT NULL,
+    geom_x              DOUBLE PRECISION NOT NULL,
+    geom_y              DOUBLE PRECISION NOT NULL,
+    change_note         TEXT,
+    source_doc_id       BIGINT REFERENCES source_documents(doc_id),
+    received_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (master_id, revision_no)
+);
+CREATE INDEX IF NOT EXISTS idx_shelter_coord_rev_received
+    ON shelter_coordinate_revisions(received_at);
+
+-- ---------------------------------------------------------- 公告接入模块 --
+-- 公告以 (announcement_id, revision_no) 追加；可见性按 received_at <= cutoff。
+-- kind 区分开放安排 / 容量核验 / 撤销 / 坐标变更，关联同一场所的不同证据面。
+CREATE TABLE IF NOT EXISTS shelter_announcements (
+    announcement_id     TEXT NOT NULL,
+    revision_no         INTEGER NOT NULL,
+    kind                TEXT NOT NULL CHECK (kind IN
+                        ('open','capacity','revoke','coordinate')),
+    site_name           TEXT NOT NULL,
+    address             TEXT,
+    geom_x              DOUBLE PRECISION,
+    geom_y              DOUBLE PRECISION,
+    unit_raw            TEXT,                       -- 原文容量单位：床/人/间...
+    capacity_value      DOUBLE PRECISION CHECK (capacity_value IS NULL OR capacity_value >= 0),
+    occupancy_value     DOUBLE PRECISION CHECK (occupancy_value IS NULL OR occupancy_value >= 0),
+    occupancy_known     BOOLEAN NOT NULL DEFAULT TRUE, -- 情景开始时现有占用是否已知
+    verified_at         TIMESTAMPTZ,                -- 容量核验时点
+    proof_expires_at    TIMESTAMPTZ,                -- 核验证明有效期
+    open_from           TIMESTAMPTZ,
+    open_to             TIMESTAMPTZ,
+    effective_at        TIMESTAMPTZ,                -- 撤销生效时刻
+    note                TEXT,
+    source_doc_id       BIGINT REFERENCES source_documents(doc_id),
+    received_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (announcement_id, revision_no)
+);
+CREATE INDEX IF NOT EXISTS idx_shelter_ann_received
+    ON shelter_announcements(received_at);
+CREATE INDEX IF NOT EXISTS idx_shelter_ann_kind
+    ON shelter_announcements(kind);
+
+-- ---------------------------------------------------------- 实体消歧模块 --
+-- 人工确认/驳回：对歧义公告指定唯一场所或明确驳回。仅影响此后生成的报告。
+CREATE TABLE IF NOT EXISTS shelter_entity_overrides (
+    override_id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    announcement_id     TEXT NOT NULL,
+    master_id           TEXT REFERENCES shelter_masters(master_id),
+    action              TEXT NOT NULL CHECK (action IN ('confirm','reject')),
+    note                TEXT,
+    created_by          TEXT NOT NULL DEFAULT 'analyst',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((action = 'confirm' AND master_id IS NOT NULL)
+           OR (action = 'reject' AND master_id IS NULL))
+);
+
+-- ------------------------------------------------------- 五条独立版本流 --
+CREATE TABLE IF NOT EXISTS shelter_module_versions (
+    module              TEXT NOT NULL CHECK (module IN
+                        ('catalog','announcements','entity_resolution',
+                         'capacity_verification','scenario_report')),
+    version_id          BIGINT GENERATED ALWAYS AS IDENTITY,
+    cutoff_at           TIMESTAMPTZ NOT NULL,
+    fingerprint         TEXT NOT NULL,
+    detail              JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (module, version_id),
+    UNIQUE (module, fingerprint)
+);
+
+-- ---------------------------------------------------------- 情景报告模块 --
+-- 需求侧与场所侧是两个独立指标：reachable_demand 只来自冻结覆盖任务，
+-- capacity_low/high 只来自场所容量证据，二者不在同一列上混合。
+CREATE TABLE IF NOT EXISTS shelter_scenario_reports (
+    report_id           UUID PRIMARY KEY,
+    signature           TEXT NOT NULL UNIQUE,
+    task_id             UUID NOT NULL REFERENCES compute_tasks(task_id),
+    policy              TEXT NOT NULL CHECK (policy IN ('auto','manual')),
+    evaluation_time     TIMESTAMPTZ NOT NULL,       -- 情景时点
+    evidence_cutoff_at  TIMESTAMPTZ NOT NULL,
+    version_catalog     BIGINT NOT NULL,
+    version_announcements BIGINT NOT NULL,
+    version_entity      BIGINT NOT NULL,
+    version_capacity    BIGINT NOT NULL,
+    version_report      BIGINT NOT NULL,
+    previous_report_id  UUID REFERENCES shelter_scenario_reports(report_id),
+    reachable_demand_population DOUBLE PRECISION NOT NULL, -- 仅冻结基线可达需求
+    capacity_low_total  DOUBLE PRECISION NOT NULL,         -- 已核验可用容量下界
+    capacity_high_total DOUBLE PRECISION NOT NULL,         -- 已核验可用容量上界
+    comparison          TEXT NOT NULL CHECK (comparison IN
+                        ('capacity_shortfall','capacity_meets_demand_lower_bound',
+                         'inconclusive_between_bounds')),
+    affected_sites      JSONB NOT NULL DEFAULT '[]'::jsonb, -- 相对上一版受影响场所
+    summary_json        JSONB NOT NULL,
+    created_by          TEXT NOT NULL DEFAULT 'analyst',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_shelter_report_task
+    ON shelter_scenario_reports(task_id, policy, evaluation_time);
+
+CREATE TABLE IF NOT EXISTS shelter_scenario_site_results (
+    report_id           UUID NOT NULL REFERENCES shelter_scenario_reports(report_id)
+                        ON DELETE CASCADE,
+    site_key            TEXT NOT NULL,              -- master_id 或 PENDING:<announcement_id>
+    master_id           TEXT,
+    display_name        TEXT NOT NULL,
+    address             TEXT,
+    geom_x              DOUBLE PRECISION,
+    geom_y              DOUBLE PRECISION,
+    entity_status       TEXT NOT NULL CHECK (entity_status IN
+                        ('resolved','entity_pending')),
+    entity_policy       TEXT NOT NULL,
+    match_method        TEXT,
+    candidate_count     INTEGER NOT NULL DEFAULT 0,
+    candidates_json     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    announcement_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    capacity_unit_raw   TEXT,
+    capacity_unit       TEXT,                       -- person | bed | room | unknown
+    capacity_value      DOUBLE PRECISION,
+    capacity_persons    DOUBLE PRECISION,           -- 换算后上限，单位未知则为 NULL
+    occupancy_known     BOOLEAN,
+    occupancy_value     DOUBLE PRECISION,
+    available_low       DOUBLE PRECISION,           -- 可用容量下界（人）
+    available_high      DOUBLE PRECISION,           -- 可用容量上界（人）
+    open_status         TEXT NOT NULL DEFAULT 'unknown', -- open|not_open|revoked|not_yet_open|closed|no_open_record|unknown
+    open_from           TIMESTAMPTZ,
+    open_to             TIMESTAMPTZ,
+    proof_status        TEXT NOT NULL DEFAULT 'missing', -- valid|expired|missing
+    verified_at         TIMESTAMPTZ,
+    status              TEXT NOT NULL CHECK (status IN
+                        ('ok','capacity_unknown','upper_bound_uncertain',
+                         'not_open','entity_pending')),
+    status_reason       TEXT,
+    included_in_total   BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence_sources    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    PRIMARY KEY (report_id, site_key)
+);

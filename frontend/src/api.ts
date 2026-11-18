@@ -4,6 +4,8 @@ import type {
   Comparison,
   ConnectorRow,
   EdgeRevision,
+  EntityPolicy,
+  EntityResolution,
   GridRow,
   NodeRow,
   OpenWindow,
@@ -12,6 +14,11 @@ import type {
   ScenarioListRow,
   ScenarioResult,
   ShareRow,
+  ShelterAnnouncementRow,
+  ShelterCatalogSite,
+  ShelterModuleVersion,
+  ShelterReport,
+  ShelterReportResult,
   ShelterRow,
   SourceDoc,
   Summary,
@@ -186,4 +193,65 @@ export const api = {
   reseed: () => request("/admin/reseed", { method: "POST" }),
 
   applyC2: () => request("/admin/apply-c2-revision", { method: "POST" }),
+
+  // ------------------------------------------------------ 安置点情报 --
+  shelterCatalog: (cutoff: string) =>
+    request<{ sites: ShelterCatalogSite[]; version: ShelterModuleVersion }>(
+      `/shelter-intel/catalog?cutoff=${encodeURIComponent(cutoff)}`
+    ),
+
+  shelterAnnouncements: (cutoff: string) =>
+    request<{ announcements: ShelterAnnouncementRow[]; version: ShelterModuleVersion }>(
+      `/shelter-intel/announcements?cutoff=${encodeURIComponent(cutoff)}`
+    ),
+
+  shelterEntities: (cutoff: string, policy: EntityPolicy) =>
+    request<{
+      policy: EntityPolicy;
+      resolutions: EntityResolution[];
+      version: ShelterModuleVersion;
+    }>(
+      `/shelter-intel/entities?cutoff=${encodeURIComponent(cutoff)}&policy=${policy}`
+    ),
+
+  shelterVersions: (module?: string) =>
+    request<{ versions: ShelterModuleVersion[] }>(
+      `/shelter-intel/versions${module ? `?module=${module}` : ""}`
+    ),
+
+  createShelterReport: (payload: {
+    task_id: string;
+    policy: EntityPolicy;
+    evidence_cutoff?: string;
+    evaluation_time?: string;
+  }) =>
+    request<ShelterReportResult>("/shelter-intel/reports", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  listShelterReports: (taskId?: string) =>
+    request<{ reports: ShelterReport[] }>(
+      `/shelter-intel/reports${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`
+    ),
+
+  getShelterReport: (reportId: string) =>
+    request<ShelterReportResult>(`/shelter-intel/reports/${reportId}`),
+
+  ingestAnnouncement: (payload: Record<string, unknown>) =>
+    request<{ announcement: ShelterAnnouncementRow }>("/shelter-intel/announcements", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  overrideEntity: (payload: {
+    announcement_id: string;
+    action: "confirm" | "reject";
+    master_id?: string;
+    note?: string;
+  }) =>
+    request<{ override: Record<string, unknown> }>("/shelter-intel/entities/override", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };

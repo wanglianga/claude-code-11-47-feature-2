@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import init_db
-from .routers import admin, comparisons, events, scenarios, sources
+from .routers import admin, comparisons, events, scenarios, shelter_intel, sources
 
 
 @asynccontextmanager
@@ -40,6 +40,7 @@ app.include_router(sources.router)
 app.include_router(scenarios.router)
 app.include_router(events.router)
 app.include_router(comparisons.router)
+app.include_router(shelter_intel.router)
 app.include_router(admin.router)
 
 
